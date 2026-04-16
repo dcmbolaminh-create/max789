@@ -1,111 +1,215 @@
 const express = require("express");
 const axios = require("axios");
+const cors = require("cors");
 
 const app = express();
+app.use(cors());
+
 const PORT = process.env.PORT || 3000;
 
-const API_URL = "http://160.250.247.143:9000/api";
-
-// ====== CONFIG ======
+// ===== CONFIG =====
+const API_URL = "https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau";
 const ADMIN = "@vanminh2603";
-let history = []; // lưu 50 phiên
 
-// ====== PHÂN TÍCH CẦU ======
-function analyzePattern(data) {
-    if (data.length < 5) return "random";
+// ===== CACHE =====
+let cache = null;
+let lastFetch = 0;
+let lastSessionId = null;
 
-    const last = data.slice(-5).map(x => x.result);
+// ===== CONFIG TIME =====
+const FETCH_INTERVAL = 30000; // 30s
 
-    // cầu bệt
-    if (last.every(x => x === "chan")) return "bet_chan";
-    if (last.every(x => x === "le")) return "bet_le";
-
-    // cầu 1-1
-    let zigzag = true;
-    for (let i = 1; i < last.length; i++) {
-        if (last[i] === last[i - 1]) zigzag = false;
-    }
-
-    if (zigzag) {
-        return last[last.length - 1] === "chan" ? "bet_le" : "bet_chan";
-    }
-
-    return "random";
+// ===== HELPER =====
+function getTaiXiu(value) {
+  return value >= 11 ? "TÀI" : "XỈU";
 }
 
-// ====== AI DỰ ĐOÁN ======
-function predict(history) {
-    const pattern = analyzePattern(history);
-
-    if (pattern === "bet_chan") return "chan";
-    if (pattern === "bet_le") return "le";
-
-    // fallback random nhẹ
-    return Math.random() > 0.5 ? "chan" : "le";
+function getChanLe(value) {
+  return value % 2 === 0 ? "CHẴN" : "LẺ";
 }
 
-// ====== CALL API ======
-async function getData() {
-    try {
-        const res = await axios.get(API_URL, { timeout: 10000 });
-        return res.data;
-    } catch {
-        return null;
+// ===== MARKOV AI =====
+function markovPredict(history) {
+  let transitions = {};
+
+  for (let i = 0; i < history.length - 1; i++) {
+    let curr = history[i];
+    let next = history[i + 1];
+
+    if (!transitions[curr]) transitions[curr] = {};
+    if (!transitions[curr][next]) transitions[curr][next] = 0;
+
+    transitions[curr][next]++;
+  }
+
+  let last = history[history.length - 1];
+  let nextStates = transitions[last] || {};
+
+  let max = 0;
+  let predict = "UNKNOWN";
+
+  for (let key in nextStates) {
+    if (nextStates[key] > max) {
+      max = nextStates[key];
+      predict = key;
     }
+  }
+
+  return {
+    predict,
+    confidence: max
+  };
 }
 
-// ====== API CHÍNH ======
-app.get("/api", async (req, res) => {
-    const data = await getData();
+// ===== PATTERN ANALYSIS =====
+function analyzePattern(results) {
+  let tx = results.map(x => getTaiXiu(x));
+  let cl = results.map(x => getChanLe(x));
 
-    let phien = Date.now();
-    let result = Math.random() > 0.5 ? "chan" : "le";
+  let pattern = {
+    bet: null,
+    type: "",
+    streak: 0
+  };
 
-    if (data) {
-        phien = data.phien || data.round || phien;
-        result = data.ket_qua || result;
+  // cầu bệt
+  let last = tx[tx.length - 1];
+  let streak = 1;
+
+  for (let i = tx.length - 2; i >= 0; i--) {
+    if (tx[i] === last) streak++;
+    else break;
+  }
+
+  if (streak >= 3) {
+    pattern.bet = last;
+    pattern.type = "CẦU BỆT";
+    pattern.streak = streak;
+  }
+
+  // cầu 1-1
+  let is11 = true;
+  for (let i = tx.length - 1; i > tx.length - 6; i--) {
+    if (tx[i] === tx[i - 1]) {
+      is11 = false;
+      break;
+    }
+  }
+
+  if (is11) {
+    pattern.bet = tx[tx.length - 1] === "TÀI" ? "XỈU" : "TÀI";
+    pattern.type = "CẦU 1-1";
+  }
+
+  // cầu 2-2
+  let is22 = true;
+  for (let i = tx.length - 1; i > tx.length - 8; i -= 2) {
+    if (!(tx[i] === tx[i - 1])) {
+      is22 = false;
+      break;
+    }
+  }
+
+  if (is22) {
+    pattern.bet = tx[tx.length - 1] === "TÀI" ? "XỈU" : "TÀI";
+    pattern.type = "CẦU 2-2";
+  }
+
+  // cầu 2-1
+  let last3 = tx.slice(-3).join("-");
+  if (last3 === "TÀI-TÀI-XỈU" || last3 === "XỈU-XỈU-TÀI") {
+    pattern.bet = tx[tx.length - 1];
+    pattern.type = "CẦU 2-1";
+  }
+
+  return {
+    taiXiu: tx,
+    chanLe: cl,
+    pattern
+  };
+}
+
+// ===== WINRATE =====
+function calculateWinrate(results) {
+  let correct = 0;
+
+  for (let i = 0; i < results.length - 1; i++) {
+    if (results[i] === results[i + 1]) correct++;
+  }
+
+  return ((correct / results.length) * 100).toFixed(2);
+}
+
+// ===== FETCH API =====
+async function fetchData() {
+  const now = Date.now();
+
+  if (cache && now - lastFetch < FETCH_INTERVAL) {
+    return cache;
+  }
+
+  try {
+    const res = await axios.get(API_URL);
+    let data = res.data;
+
+    // tránh trùng phiên
+    if (data?.sessionId === lastSessionId) {
+      return cache;
     }
 
-    // lưu lịch sử
-    history.push({ phien, result });
-    if (history.length > 50) history.shift();
+    lastSessionId = data?.sessionId;
+    lastFetch = now;
 
-    const duDoan = predict(history);
+    let results = data?.data?.map(x => x.total) || [];
 
-    // fake xúc xắc
-    const xucXac = [
-        Math.random() > 0.5 ? "do" : "trang",
-        Math.random() > 0.5 ? "do" : "trang",
-        Math.random() > 0.5 ? "do" : "trang"
-    ];
+    let analysis = analyzePattern(results);
+    let markovTX = markovPredict(analysis.taiXiu);
+    let markovCL = markovPredict(analysis.chanLe);
 
-    const soDo = xucXac.filter(x => x === "do").length;
-    const soTrang = 3 - soDo;
+    let winrate = calculateWinrate(analysis.taiXiu);
 
-    res.json({
-        success: true,
-        admin: ADMIN,
-        phien_hien_tai: phien,
-        du_doan: duDoan,
-        lich_su: history,
-        pattern: analyzePattern(history),
-        du_doan_xuc_xac: xucXac,
-        cua_dat:
-            soDo === 3 ? "3_do" :
-            soTrang === 3 ? "3_trang" :
-            soDo === 2 ? "2_do_1_trang" :
-            "1_do_2_trang",
-        so_do: soDo,
-        so_trang: soTrang
-    });
-});
+    cache = {
+      admin: ADMIN,
+      session: data.sessionId,
+      time: new Date().toLocaleString("vi-VN"),
+      results: data.data,
 
-// ====== ROUTE CHECK ======
+      analysis: {
+        pattern: analysis.pattern,
+        markov_taixiu: markovTX,
+        markov_chanle: markovCL,
+        winrate: winrate + "%"
+      }
+    };
+
+    return cache;
+  } catch (err) {
+    return {
+      error: "API lỗi",
+      admin: ADMIN
+    };
+  }
+}
+
+// ===== ROUTES =====
 app.get("/", (req, res) => {
-    res.send("🚀 API SOI CẦU VIP RUNNING - ADM " + ADMIN);
+  res.json({
+    status: "VIP PRO MAX RUNNING",
+    admin: ADMIN
+  });
 });
 
-// ====== START ======
+app.get("/get", async (req, res) => {
+  const data = await fetchData();
+  res.json(data);
+});
+
+app.get("/taixiumd5", async (req, res) => {
+  const data = await fetchData();
+  res.json(data);
+});
+
+// ===== START =====
 app.listen(PORT, () => {
-    console.log("🔥 Server chạy tại port " + PORT);
+  console.log("🚀 Server VIP chạy tại port " + PORT);
 });
