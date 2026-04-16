@@ -4,7 +4,9 @@ const cors = require("cors");
 
 const app = express();
 app.use(cors());
-app.set("json spaces", 2);
+
+// JSON gọn
+app.set("json spaces", 0);
 
 const PORT = process.env.PORT || 3000;
 
@@ -31,6 +33,7 @@ function markovPredict(arr) {
   for (let i = 0; i < arr.length - 1; i++) {
     let a = arr[i];
     let b = arr[i + 1];
+
     if (!map[a]) map[a] = {};
     map[a][b] = (map[a][b] || 0) + 1;
   }
@@ -81,7 +84,7 @@ function analyzePattern(results) {
   return { tx, pattern };
 }
 
-// ===== AI =====
+// ===== ĐÁNH GIÁ =====
 function evaluate(pattern, markov) {
   let score = 0;
 
@@ -103,7 +106,7 @@ async function fetchData() {
     const res = await axios.get(API_URL, { timeout: 10000 });
     let data = res.data;
 
-    // ===== AUTO FIX FORMAT =====
+    // ===== FIX FORMAT =====
     let list = [];
     if (Array.isArray(data)) list = data;
     else if (Array.isArray(data?.data)) list = data.data;
@@ -151,11 +154,6 @@ async function fetchData() {
     const ketqua = getTaiXiu(sum);
     const next = Number(session) + 1;
 
-    const tin_cay = {
-      TÀI: markov.predict === "TÀI" ? markov.confidence : "50%",
-      XỈU: markov.predict === "XỈU" ? markov.confidence : "50%"
-    };
-
     cache = {
       admin: ADMIN,
       phien: session,
@@ -170,7 +168,11 @@ async function fetchData() {
       phien_tiep_theo: next,
 
       du_doan: markov.predict,
-      do_tin_cay: tin_cay,
+
+      do_tin_cay: {
+        TÀI: markov.predict === "TÀI" ? markov.confidence : "50%",
+        XỈU: markov.predict === "XỈU" ? markov.confidence : "50%"
+      },
 
       danh_gia: evaluate(analysis.pattern, markov),
 
@@ -178,9 +180,7 @@ async function fetchData() {
 
       pattern: analysis.pattern.type,
 
-      time: new Date().toLocaleString("vi-VN"),
-
-      original: data
+      time: new Date().toLocaleString("vi-VN")
     };
 
     return cache;
@@ -188,7 +188,7 @@ async function fetchData() {
   } catch (err) {
     return cache || {
       admin: ADMIN,
-      error: "API TẠM LỖI - ĐANG DÙNG CACHE",
+      error: "API TẠM LỖI",
       time: new Date().toLocaleString("vi-VN")
     };
   }
