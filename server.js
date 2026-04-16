@@ -20,7 +20,6 @@ const FETCH_INTERVAL = 30000;
 
 // ===== HELPER =====
 const getTaiXiu = v => (v >= 11 ? "TÀI" : "XỈU");
-const getChanLe = v => (v % 2 === 0 ? "CHẴN" : "LẺ");
 
 // ===== MARKOV =====
 function markovPredict(arr) {
@@ -32,7 +31,6 @@ function markovPredict(arr) {
   for (let i = 0; i < arr.length - 1; i++) {
     let a = arr[i];
     let b = arr[i + 1];
-
     if (!map[a]) map[a] = {};
     map[a][b] = (map[a][b] || 0) + 1;
   }
@@ -83,7 +81,7 @@ function analyzePattern(results) {
   return { tx, pattern };
 }
 
-// ===== AI ĐÁNH GIÁ =====
+// ===== AI =====
 function evaluate(pattern, markov) {
   let score = 0;
 
@@ -99,18 +97,36 @@ function evaluate(pattern, markov) {
 // ===== FETCH =====
 async function fetchData() {
   const now = Date.now();
-
   if (cache && now - lastFetch < FETCH_INTERVAL) return cache;
 
   try {
-    const res = await axios.get(API_URL);
-    const data = res.data;
+    const res = await axios.get(API_URL, { timeout: 10000 });
+    let data = res.data;
 
-    const list = Array.isArray(data?.data) ? data.data : [];
-    if (!list.length) throw new Error("No data");
+    // ===== AUTO FIX FORMAT =====
+    let list = [];
+    if (Array.isArray(data)) list = data;
+    else if (Array.isArray(data?.data)) list = data.data;
+    else if (Array.isArray(data?.result)) list = data.result;
+    else if (Array.isArray(data?.items)) list = data.items;
+
+    if (!list.length && cache) return cache;
+
+    if (!list.length) {
+      return {
+        admin: ADMIN,
+        error: "API CHƯA CÓ DỮ LIỆU",
+        time: new Date().toLocaleString("vi-VN")
+      };
+    }
 
     const latest = list[0];
-    const session = latest.sessionId || latest.SessionId;
+
+    const session =
+      latest.sessionId ||
+      latest.SessionId ||
+      latest.id ||
+      Date.now();
 
     if (session === lastSessionId) return cache;
 
@@ -119,31 +135,29 @@ async function fetchData() {
 
     // ===== MAP =====
     const results = list
-      .map(x => Number(x.total || x.DiceSum))
+      .map(x => Number(x.total || x.DiceSum || x.sum))
       .filter(x => !isNaN(x));
 
     const analysis = analyzePattern(results);
     const markov = markovPredict(analysis.tx);
 
-    // ===== CURRENT =====
+    // ===== DATA =====
     const x1 = latest.FirstDice || latest.firstDice || 0;
     const x2 = latest.SecondDice || latest.secondDice || 0;
     const x3 = latest.ThirdDice || latest.thirdDice || 0;
-    const sum = latest.DiceSum || latest.total || 0;
+
+    const sum = latest.DiceSum || latest.total || x1 + x2 + x3;
 
     const ketqua = getTaiXiu(sum);
-    const next = session + 1;
+    const next = Number(session) + 1;
 
     const tin_cay = {
       TÀI: markov.predict === "TÀI" ? markov.confidence : "50%",
       XỈU: markov.predict === "XỈU" ? markov.confidence : "50%"
     };
 
-    const lydo = `Markov | ${analysis.pattern.type} | Cầu ${analysis.pattern.streak}`;
-
     cache = {
       admin: ADMIN,
-
       phien: session,
 
       xuc_xac_1: x1,
@@ -160,29 +174,29 @@ async function fetchData() {
 
       danh_gia: evaluate(analysis.pattern, markov),
 
-      ly_do: lydo,
+      ly_do: `Markov | ${analysis.pattern.type} | Cầu ${analysis.pattern.streak}`,
 
       pattern: analysis.pattern.type,
 
       time: new Date().toLocaleString("vi-VN"),
 
-      // FULL API GỐC
       original: data
     };
 
     return cache;
 
   } catch (err) {
-    return {
+    return cache || {
       admin: ADMIN,
-      error: "API LỖI"
+      error: "API TẠM LỖI - ĐANG DÙNG CACHE",
+      time: new Date().toLocaleString("vi-VN")
     };
   }
 }
 
 // ===== ROUTES =====
 app.get("/", (req, res) => {
-  res.json({ status: "VIP PRO MAX", admin: ADMIN });
+  res.json({ status: "MA789 VIP RUNNING", admin: ADMIN });
 });
 
 app.get("/get", async (req, res) => {
@@ -194,11 +208,10 @@ app.get("/taixiumd5", async (req, res) => {
 });
 
 app.get("/predict", async (req, res) => {
-  const data = await fetchData();
-  res.json(data);
+  res.json(await fetchData());
 });
 
 // ===== START =====
 app.listen(PORT, () => {
-  console.log("🔥 TAIXIU VIP FULL RUNNING " + PORT);
+  console.log("🔥 MA789 VIP RUNNING PORT " + PORT);
 });
